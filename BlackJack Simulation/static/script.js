@@ -1,7 +1,8 @@
 const setupScreen = document.getElementById('setup-screen');
 const gameScreen = document.getElementById('game-screen');
 const numPlayersInput = document.getElementById('num-players');
-const startBtn = document.getElementById('start-btn');
+const numAiPlayersInput = document.getElementById('num-ai-players');
+const startGameBtn = document.getElementById('start-game-btn');
 const dealerCardsDiv = document.getElementById('dealer-cards');
 const dealerScoreDiv = document.getElementById('dealer-score');
 const playersArea = document.getElementById('players-area');
@@ -16,14 +17,15 @@ const newGameBtn = document.getElementById('new-game-btn');
 
 let gameState = null;
 
-startBtn.addEventListener('click', startGame);
+startGameBtn.addEventListener('click', startGame);
 hitBtn.addEventListener('click', () => sendAction('hit'));
 standBtn.addEventListener('click', () => sendAction('stand'));
 splitBtn.addEventListener('click', () => sendAction('split'));
 
 nextRoundBtn.addEventListener('click', async () => {
     const response = await fetch('/next_round', { method: 'POST' });
-    gameState = await response.json();
+    const data = await response.json();
+    gameState = data; // Server now returns state directly
     renderGame();
 });
 
@@ -36,12 +38,14 @@ newGameBtn.addEventListener('click', () => {
 
 async function startGame() {
     const numPlayers = parseInt(numPlayersInput.value);
+    const numAiPlayers = parseInt(numAiPlayersInput.value);
     const response = await fetch('/start_game', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ num_players: numPlayers })
+        body: JSON.stringify({ num_players: numPlayers, ai_players: numAiPlayers })
     });
-    gameState = await response.json();
+    const data = await response.json();
+    gameState = data; // Server now returns state directly
     setupScreen.classList.add('hidden');
     gameScreen.classList.remove('hidden');
     renderGame();
@@ -78,10 +82,14 @@ function renderGame() {
     playersArea.innerHTML = '';
     gameState.players.forEach((player, index) => {
         const playerBox = document.createElement('div');
-        playerBox.className = `player-box ${index === gameState.current_player_index && !gameState.game_over ? 'active' : ''}`;
+        playerBox.className = `player-box ${index === gameState.current_player_index && !gameState.game_over ? 'active' : ''} ${player.is_ai ? 'ai-player' : ''}`;
 
         const title = document.createElement('h3');
-        title.innerText = `Player ${player.id}`;
+        let playerTitle = `Player ${player.id}`;
+        if (player.is_ai) {
+            playerTitle += " (Bot)";
+        }
+        title.innerText = playerTitle;
         playerBox.appendChild(title);
 
         const stats = document.createElement('div');

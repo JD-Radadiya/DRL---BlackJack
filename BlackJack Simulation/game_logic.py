@@ -18,19 +18,51 @@ class Card:
         return {'suit': self.suit, 'rank': self.rank, 'value': self.value}
 
 class Deck:
-    def __init__(self):
-        suits = ['hearts', 'diamonds', 'clubs', 'spades']
-        ranks = ['2', '3', '4', '5', '6', '7', '8', '9', '10', 'J', 'Q', 'K', 'A']
-        self.cards = [Card(suit, rank) for suit in suits for rank in ranks]
-        self.shuffle()
+    def __init__(self, num_decks=6):
+        self.num_decks = num_decks
+        self.suits = ['hearts', 'diamonds', 'clubs', 'spades']
+        self.ranks = ['2', '3', '4', '5', '6', '7', '8', '9', '10', 'J', 'Q', 'K', 'A']
+        self.cards = []
+        self.reshuffle()
 
-    def shuffle(self):
+    def reshuffle(self):
+        self.cards = [Card(suit, rank) for _ in range(self.num_decks) for suit in self.suits for rank in self.ranks]
         random.shuffle(self.cards)
 
     def deal(self):
+        # Reshuffle if penetration is too deep (e.g., less than 20% cards remaining)
+        if len(self.cards) < (52 * self.num_decks * 0.2):
+            self.reshuffle()
+            
         if not self.cards:
-            return None # Should handle reshuffle or empty deck
+            self.reshuffle()
+            
         return self.cards.pop()
+
+    def get_seen_cards(self):
+        # Calculate seen cards based on what's missing from a full shoe
+        full_counts = {
+            '2': 4 * self.num_decks, '3': 4 * self.num_decks, '4': 4 * self.num_decks,
+            '5': 4 * self.num_decks, '6': 4 * self.num_decks, '7': 4 * self.num_decks,
+            '8': 4 * self.num_decks, '9': 4 * self.num_decks, '10': 4 * self.num_decks,
+            'J': 4 * self.num_decks, 'Q': 4 * self.num_decks, 'K': 4 * self.num_decks,
+            'A': 4 * self.num_decks
+        }
+        
+        current_counts = {r: 0 for r in self.ranks}
+        for card in self.cards:
+            current_counts[card.rank] += 1
+            
+        seen_counts = {r: full_counts[r] - current_counts[r] for r in self.ranks}
+        
+        # Convert to vector format expected by RL agent: 2,3,4,5,6,7,8,9,10(inc JQK),A
+        vector = [
+            seen_counts['2'], seen_counts['3'], seen_counts['4'], seen_counts['5'],
+            seen_counts['6'], seen_counts['7'], seen_counts['8'], seen_counts['9'],
+            seen_counts['10'] + seen_counts['J'] + seen_counts['Q'] + seen_counts['K'],
+            seen_counts['A']
+        ]
+        return vector
 
 class Hand:
     def __init__(self):
@@ -70,8 +102,9 @@ class Hand:
         }
 
 class Player:
-    def __init__(self, player_id):
+    def __init__(self, player_id, is_ai=False):
         self.id = player_id
+        self.is_ai = is_ai
         self.hands = [Hand()]
         self.active_hand_index = 0
         self.stats = {'wins': 0, 'losses': 0, 'draws': 0}
@@ -107,6 +140,7 @@ class Player:
     def to_dict(self):
         return {
             'id': self.id,
+            'is_ai': self.is_ai,
             'hands': [h.to_dict() for h in self.hands],
             'active_hand_index': self.active_hand_index,
             'stats': self.stats
@@ -114,17 +148,24 @@ class Player:
 
 class BlackjackGame:
     def __init__(self):
-        self.deck = Deck()
+        self.deck = Deck(num_decks=6)
         self.dealer_hand = Hand()
         self.players = []
         self.current_player_index = 0
         self.game_over = False
         self.game_started = False
 
-    def start_game(self, num_players):
-        self.deck = Deck()
+    def start_game(self, num_players, ai_players=0):
+        # We assume start_game is a hard reset, so we reset the deck too?
+        # User said "In new rounds we don't re-shuffle".
+        # But "start_game" usually implies a fresh session.
+        # Let's keep a persistent deck if possible, or reset it here.
+        # Given the UI has "New Game" and "Next Round", "New Game" likely means fresh deck.
+        self.deck = Deck(num_decks=6)
         self.dealer_hand = Hand()
         self.players = [Player(i+1) for i in range(num_players)]
+        for i in range(ai_players):
+            self.players.append(Player(num_players + i + 1, is_ai=True))
         self.current_player_index = 0
         self.game_over = False
         self.game_started = True
@@ -138,7 +179,7 @@ class BlackjackGame:
         self._update_turn()
 
     def next_round(self):
-        self.deck = Deck()
+        # Do NOT reset self.deck here
         self.dealer_hand = Hand()
         self.current_player_index = 0
         self.game_over = False
@@ -265,3 +306,41 @@ class BlackjackGame:
             'game_over': self.game_over,
             'game_started': self.game_started
         }
+
+    def get_ai_observation(self, player_id):
+        player = self.players[player_id - 1]
+        hand = player.current_hand()
+        if not hand:
+            return None
+            
+        # [Player Sum (0-32), Dealer Upcard (0-11), Usable Ace (0-1), 
+        #  Seen Cards Hist (10 ints), Decks Remaining (float)]
+        
+        player_val = hand.get_value()
+        
+        # Dealer Upcard
+        dealer_up_val = self.dealer_hand.cards[0].value if self.dealer_hand.cards else 0
+        
+        # Usable Ace
+        aces = sum(1 for c in hand.cards if c.rank == 'A')
+        # Simple check: if value <= 21 and we have an ace that could be 11
+        # Actually, get_value() already reduces aces. If we have an ace and value <= 21,
+        # we need to know if one is countable as 11.
+        # Re-calculate soft value
+        soft_val = sum(c.value for c in hand.cards) # Aces are 11
+        usable_ace = 1 if (soft_val <= 21 and aces > 0) else 0
+        
+        seen_cards = self.deck.get_seen_cards()
+        decks_remaining = len(self.deck.cards) / 52.0
+        
+        # Normalize
+        obs = [
+            player_val / 21.0,
+            dealer_up_val / 10.0,
+            float(usable_ace),
+        ]
+        # Normalize seen cards
+        obs.extend([x / (6 * 4.0) for x in seen_cards]) # 6 decks
+        obs.append(decks_remaining / 6.0)
+        
+        return obs
